@@ -1,0 +1,5 @@
+need to have the following rubygems installed
+	sequel
+	open4
+	some gem that sequel uses for your database
+		postgres-rb, ruby-pg, etc.
