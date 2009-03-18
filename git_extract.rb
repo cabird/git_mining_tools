@@ -65,7 +65,7 @@ def setupTables(db)
 
 end
 
-def mine_git_repo(db, repo_path)
+def mine_git_repo(repo_name, db, repo_path)
 	#setup some prepared sql statements
 	check_sha = db[:git_commit].filter(:commit => :$commit).prepare(:select)
 	insert_commit = db[:git_commit].prepare(:insert, 
@@ -81,10 +81,9 @@ def mine_git_repo(db, repo_path)
 	puts git_log_cmd
 
 	error_txt = ""
-	lines = []
+	history = []
 	status = Open4::popen4(git_log_cmd) do |pid, stdin, stdout, stderr|
-		lines = stdout.readlines
-
+		history = stdout.readlines
 		error_txt = stderr.read
 	end
 	#if there was an error message, then print it out and die
@@ -93,11 +92,27 @@ def mine_git_repo(db, repo_path)
 		puts error_txt
 		exit(1)
 	end
-	puts lines
+	puts history
+
+	i = 0
+	while i < history.length-9
+		puts "#{i}: #{history[i]}"
+		s = i
+		commit_id = history[i]
+		#we ALWAYS have to insert the repo and the refs
+		db[:git_repo].insert(:repo => repo_name, :commit => commit_id)
+
+		i += 1
+		if not history[s+7].empty?
+			history[s+7].sub(/^\s*\(/, "")
+			history[s+7].sub(/\)\s$/, "")
+			#continur from here
+
+	end
 	
 end	
 
 
 DB = Sequel.connect(ARGV[0])
 setupTables(DB)
-mine_git_repo(DB, ".")
+mine_git_repo("test_repo", DB, ".")
