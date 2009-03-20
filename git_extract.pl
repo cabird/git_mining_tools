@@ -210,10 +210,10 @@ my $db_check_repo_ref = $dbh_ref->prepare(q{select repo from git_repo where repo
 process_dir($config{repo_path}, \%config, $db_check_repo_ref);
 
 #update parent and children refs in git table
-$dbh_ref->do(q{update git_commit set num_parent = r.parent from (select child, count(*) as parent from git_dag, git_commit where git_dag.child = git_commit.commit and num_parent = 0 group by child) as r where r.child = git_commit.commit})
+$dbh_ref->do(q{update git_commit set num_parents = r.parent from (select child, count(*) as parent from git_dag, git_commit where git_dag.child = git_commit.commit group by child) as r where r.child = git_commit.commit})
 	or warn "Problem updating number of parents ", $dbh_ref->errstr;
 
-$dbh_ref->do(q{update git_commit set num_child = r.child from (select parent, count(*) as child from git_dag, git_commit where git_dag.parent = git_commit.commit and num_child = 0 group by parent) as r where r.parent = git_commit.commit})
+$dbh_ref->do(q{update git_commit set num_children = r.child from (select parent, count(*) as child from git_dag, git_commit where git_dag.parent = git_commit.commit group by parent) as r where r.parent = git_commit.commit})
 	or warn "Problem updating number of children ", $dbh_ref->errstr;
 
 $db_check_repo_ref->finish;
