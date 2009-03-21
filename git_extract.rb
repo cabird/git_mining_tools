@@ -1,3 +1,7 @@
+#! /usr/bin/ruby
+# add the directory of the script file to the load path so
+# ruby will find trollop
+$LOAD_PATH << File.expand_path(File.dirname(__FILE__))
 require 'set'
 require 'rubygems'
 require 'sequel'
@@ -251,9 +255,6 @@ def update_relations(db)
 	$timer.log
 end
 
-
-
-
 def main
 	opts = Trollop::options do
 		version "git_extract.rb version 0.1"
@@ -272,10 +273,11 @@ EOS
 			:short => "d", :required => true, :type => String
 		opt :name, "repo name to be stored in database", :short => "n", :required => true,
 			:type => String
+		opt :reset, "clear contents of tables before inserting"
 	end
 	p opts
 	db = Sequel.connect(opts[:dburl])
-	setup_tables(db, true)
+	setup_tables(db, opts[:reset])
 	puts "getting log lines"
 	if opts[:log] != nil
 		history = get_file_log_lines(opts[:log])
