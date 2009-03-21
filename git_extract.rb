@@ -21,12 +21,6 @@ class Symbol
 	end
 end
 
-def setup_table(name, db, reset, &block)
-	db.drop_table name if db.table_exists? name and reset
-	if not db.table_exists? name
-		db.create_table name, &block 
-	end
-end
 
 class Timer
 	def initialize
@@ -50,6 +44,13 @@ end
 
 $timer = Timer.new
 
+def setup_table(name, db, reset, &block)
+	print "reset is #{reset} and table is #{name} and table exists is #{db.table_exists? name}\n"
+	db.drop_table name if db.table_exists? name and reset
+	if not db.table_exists? name
+		db.create_table name, &block 
+	end
+end
 
 def setup_tables(db, reset)
 	setup_table :git_repo, db, reset do
@@ -161,7 +162,6 @@ def parse_log(repo_name, history, db)
 	refs_tags_data = []
 	dag_data = []
 	revision_data = []
-	db.transaction do	
 	loop do
 		i += 1 while i < history.length and not history[i] =~ /^__START_GIT_COMMIT_LOG_MSG__/
 		break if i >= history_length
@@ -222,7 +222,6 @@ def parse_log(repo_name, history, db)
 			i += 1
 		end
 	end
-	end
 	history.clear
 	$timer.log
 	puts "inserting #{revision_data.length} revision records"
@@ -245,14 +244,25 @@ end
 
 #do some post processing and fill in the tables
 def update_relations(db)
-	puts "gathering number of parents"
-	db << "update git_commit set num_parents = r.parents from (select child, count(*) as parents from
-		git_dag group by child) as r where r.child = git_commit.commit"
-	$timer.log
-	puts "gathering number of children"
-	db << "update git_commit set num_children = r.children from (select parent, count(*) as children from
-		git_dag group by parent) as r where r.parent = git_commit.commit"
-	$timer.log
+	if db.uri =~ /^mysql/
+		puts "gathering number of parents"
+		db << "update git_commit set num_parents = (select count(*) as parents from
+			git_dag where commit = child)"
+		$timer.log
+		puts "gathering number of children"
+		db << "update git_commit set num_children = (select count(*) as children from
+			git_dag)"
+		$timer.log
+	elsif db.uri =~ /^postgres/
+		puts "gathering number of parents"
+		db << "update git_commit set num_parents = r.parents from (select child, count(*) as parents from
+			git_dag group by child) as r where r.child = git_commit.commit"
+		$timer.log
+		puts "gathering number of children"
+		db << "update git_commit set num_children = r.children from (select parent, count(*) as children from
+			git_dag group by parent) as r where r.parent = git_commit.commit"
+		$timer.log
+	end
 end
 
 def main
@@ -275,7 +285,7 @@ EOS
 			:type => String
 		opt :reset, "clear contents of tables before inserting"
 	end
-	p opts
+	#p opts
 	db = Sequel.connect(opts[:dburl])
 	setup_tables(db, opts[:reset])
 	puts "getting log lines"
