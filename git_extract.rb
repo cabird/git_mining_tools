@@ -45,7 +45,6 @@ end
 $timer = Timer.new
 
 def setup_table(name, db, reset, &block)
-	print "reset is #{reset} and table is #{name} and table exists is #{db.table_exists? name}\n"
 	db.drop_table name if db.table_exists? name and reset
 	if not db.table_exists? name
 		db.create_table name, &block 
@@ -63,10 +62,10 @@ def setup_tables(db, reset)
 		String :commit
 		String :tree
 		String :author
-		DateTime :author_dt
+		DateTime :author_dt, :default => '1980-1-1'
 		String :author_id
 		String :committer
-		DateTime :committer_dt
+		DateTime :committer_dt, :default => '1980-1-1'
 		String :committer_id
 		String :subject, :default => ''
 		Integer :num_children, :default => 0
@@ -108,9 +107,9 @@ def setup_tables(db, reset)
 
 end
 
-$git_log_cmd = "git log --full-history --all --numstat -M -C --pretty=format:\"" +
-		"__START_GIT_COMMIT_LOG_MSG__%n%H%n%T%n%an <%ae>%n%aD%n%cn <%ce>" +
-		"%n%cD%n%P%n%d%n%s%n%b%n__END_GIT_COMMIT_LOG_MSG__\""
+$git_log_cmd = "git log --full-history --all --date=iso --numstat -M -C --pretty=format:\"" +
+		"__START_GIT_COMMIT_LOG_MSG__%n%H%n%T%n%an <%ae>%n%ai%n%cn <%ce>" +
+		"%n%ci%n%P%n%d%n%s%n%b%n__END_GIT_COMMIT_LOG_MSG__\""
 
 def get_git_log_lines(repo_path)
 	#run the log command
@@ -139,6 +138,30 @@ def get_file_log_lines(file)
 	return open(file).readlines.map( &:strip )
 end
 
+# should change this to 
+def sliced_multi_insert(db, table, schema, data)
+	if db.uri =~/^mysql/
+		0.upto(data.length/50) do |i|
+			db[table].multi_insert(schema, data[i*50...(i+1)*50])
+		end
+	else
+		db[table].multi_insert(schema, data)
+	end
+end
+
+class Sequel::Dataset
+	public
+	def sliced_multi_insert(schema, data)
+		if @db.uri =~ /^mysql/
+			0.upto(data.length/50) do |i|
+				multi_insert(schema, data[i*50...(i+1)*50])
+			end
+		else
+			multi_insert(schema, data)
+		end
+	end
+	public_class_method :sliced_multi_insert
+end
 
 def parse_log(repo_name, history, db)
 	print "**** parsing history ****\n"
@@ -150,12 +173,6 @@ def parse_log(repo_name, history, db)
 	commits = Set.new
 	db[:git_commit].each { |commit| commits.add(commit) }
 
-	git_commit_ps = db[:git_commit].prepare(:insert, :commit => :$commit, :tree => :$tree, 
-		:author => :$author, :author_dt => :$author_dt,
-		:committer => :$committer, :committer_dt => :$committer_dt,
-		:log => :$log)
-
-	history_length = history.length
 
 	commit_data = []
 	repo_data = []
@@ -164,7 +181,7 @@ def parse_log(repo_name, history, db)
 	revision_data = []
 	loop do
 		i += 1 while i < history.length and not history[i] =~ /^__START_GIT_COMMIT_LOG_MSG__/
-		break if i >= history_length
+		break if i >= history.length
 		i += 1
 		s = i
 		commit_id = history[i]
@@ -186,7 +203,7 @@ def parse_log(repo_name, history, db)
 		parsed_hashes += 1
 		if parsed_hashes % 1000 == 0
 			puts "parsed #{parsed_hashes} commits\n" 
-			puts "this took #{$timer.delta} seconds\n"
+			puts "took #{$timer.delta} seconds\n"
 		end
 		#the sha may already be in the database so check that
 		next if commits.include? commit_id
@@ -202,8 +219,7 @@ def parse_log(repo_name, history, db)
 		author_dt = history[s+3]
 		committer = history[s+4]
 		committer_dt = history[s+5]
-		commit_data << [commit_id, tree, author, author_dt, committer, 
-			committer_dt, log]
+		commit_data << [commit_id, tree, author, author_dt, committer, committer_dt, log]
 		# line 6 contains the parents, add those
 		history[s+6].split(/\s+/).each do |parent| 
 			dag_data << [commit_id, parent]
@@ -212,7 +228,7 @@ def parse_log(repo_name, history, db)
 		#move past the __END_GIT_COMMIT_LOG_MSG__
 		i += 1
 		# lines after this are the files that were changed and counts of lines changed
-		while i < history_length and not history[i] =~ /__START_GIT_COMMIT_LOG_MSG__/
+		while i < history.length and not history[i] =~ /__START_GIT_COMMIT_LOG_MSG__/
 			if history[i] =~ /^(\d+)\s+(\d+)\s+(.*)/
 				# (lines added)\s+(lines removed)\s+(path)
 				revision_data << [commit_id, $1.to_i, $2.to_i, $3]
@@ -225,20 +241,21 @@ def parse_log(repo_name, history, db)
 	history.clear
 	$timer.log
 	puts "inserting #{revision_data.length} revision records"
-	db[:git_revision].multi_insert([:commit, :add, :remove, :path], revision_data)
+	# mysql will sometimes time-out so try to reconnect just in case
+	db[:git_revision].sliced_multi_insert([:commit, :add, :remove, :path], revision_data)
 	$timer.log
 	puts "inserting #{dag_data.length} dag records"
-	db[:git_dag].multi_insert([:child, :parent], dag_data)
+	db[:git_dag].sliced_multi_insert([:child, :parent], dag_data)
 	$timer.log
 	puts "inserting #{commit_data.length} commit records"
-	db[:git_commit].multi_insert( [:commit, :tree, :author, :author_id,
+	db[:git_commit].sliced_multi_insert( [:commit, :tree, :author, :author_dt,
 		:committer, :committer_dt, :log], commit_data)
 	$timer.log
 	puts "inserting #{refs_tags_data.length} ref/tag records"
-	db[:git_refs_tags].multi_insert([:commit, :path], refs_tags_data)
+	db[:git_refs_tags].sliced_multi_insert([:commit, :path], refs_tags_data)
 	$timer.log
 	puts "inserting #{repo_data.length} repo records"
-	db[:git_repo].multi_insert([:repo, :commit], repo_data)
+	db[:git_repo].sliced_multi_insert([:repo, :commit], repo_data)
 	$timer.log
 end	
 
