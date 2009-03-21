@@ -3,6 +3,7 @@ require 'rubygems'
 require 'sequel'
 require 'open4'
 require 'time'
+require 'trollop'
 
 class String 
 	def to_proc
@@ -22,7 +23,28 @@ def setup_table(name, db, reset, &block)
 		db.create_table name, &block 
 	end
 end
+
+class Timer
+	def initialize
+		@last = Time.now
+	end
 	
+	def last
+		@last
+	end
+
+	def delta
+		last = @last
+		@last = Time.now
+		return @last - last
+	end
+
+	def log
+		puts delta
+	end
+end
+
+$timer = Timer.new
 
 
 def setup_tables(db, reset)
@@ -70,7 +92,7 @@ def setup_tables(db, reset)
 		primary_key(:commit, :path)
 	end
 
-	setup_table :get_chain, db, reset do
+	setup_table :git_chain, db, reset do
 		String :commit, :null => false
 		String :name_addr 
 		Integer :indiv_id
@@ -81,13 +103,15 @@ def setup_tables(db, reset)
 
 end
 
-def mine_git_repo(repo_name, db, repo_path)
-	#run the log command
-	git_log_cmd = "cd #{repo_path} && git log --full-history --all --numstat -M -C --pretty=format:\"" +
+$git_log_cmd = "git log --full-history --all --numstat -M -C --pretty=format:\"" +
 		"__START_GIT_COMMIT_LOG_MSG__%n%H%n%T%n%an <%ae>%n%aD%n%cn <%ce>" +
 		"%n%cD%n%P%n%d%n%s%n%b%n__END_GIT_COMMIT_LOG_MSG__\""
 
+def get_git_log_lines(repo_path)
+	#run the log command
+	git_log_cmd = "cd #{repo_path} && #{$git_log_cmd}"
 	puts "Getting git log text"
+	puts git_log_cmd
 	error_txt = ""
 	history = []
 	status = Open4::popen4(git_log_cmd) do |pid, stdin, stdout, stderr|
@@ -103,8 +127,15 @@ def mine_git_repo(repo_name, db, repo_path)
 
 	puts "Parsing git log"
 	
-	history.map! &:strip 
+	return history.map!( &:strip )
+end
 
+def get_file_log_lines(file)
+	return open(file).readlines.map( &:strip )
+end
+
+
+def parse_log(repo_name, history, db)
 	print "**** parsing history ****\n"
 
 	i = 0
@@ -113,29 +144,29 @@ def mine_git_repo(repo_name, db, repo_path)
 	#get all commits that are already in the db
 	commits = Set.new
 	db[:git_commit].each { |commit| commits.add(commit) }
-	last_time = Time.now
 
-	start_re = /^__START_GIT_COMMIT_LOG_MSG__/
-	end_re = /^__END_GIT_COMMIT_LOG_MSG__/
-	file_stat_re1 =  /^(\d+)\s+(\d+)\s+(.*)/
-	file_stat_re2 = /^\-\s+\-\s+(.*)/
 	git_commit_ps = db[:git_commit].prepare(:insert, :commit => :$commit, :tree => :$tree, 
 		:author => :$author, :author_dt => :$author_dt,
 		:committer => :$committer, :committer_dt => :$committer_dt,
 		:log => :$log)
 
 	history_length = history.length
+
+	commit_data = []
+	repo_data = []
+	refs_tags_data = []
+	dag_data = []
+	revision_data = []
 	db.transaction do	
 	loop do
-		#i += 1 while i < history.length and not history[i] =~ /^__START_GIT_COMMIT_LOG_MSG__/
-		i += 1 while i < history_length and not history[i] =~ start_re
+		i += 1 while i < history.length and not history[i] =~ /^__START_GIT_COMMIT_LOG_MSG__/
 		break if i >= history_length
 		i += 1
 		s = i
 		commit_id = history[i]
 
 		#we ALWAYS have to insert the repo and the refs
-		db[:git_repo].insert(:repo => repo_name, :commit => commit_id)
+		repo_data << [repo_name, commit_id]
 
 		i += 1
 		refs_line = history[s+7]
@@ -144,69 +175,118 @@ def mine_git_repo(repo_name, db, repo_path)
 			refs_line.gsub!(/\)\s*$/, "")
 			#continue from here
 			refs_line.split(", ").each { |ref| 
-				db[:git_refs_tags].insert(:commit => commit_id, :path=>ref)
+				refs_tags_data << [commit_id, ref]
 			}
 		end
+
 		parsed_hashes += 1
 		if parsed_hashes % 1000 == 0
 			puts "parsed #{parsed_hashes} commits\n" 
-			puts "this took #{Time.now - last_time} seconds\n"
-			last_time = Time.now
+			puts "this took #{$timer.delta} seconds\n"
 		end
 		#the sha may already be in the database so check that
 		next if commits.include? commit_id
 
 		log = ""
 		i = s + 8
-		#while i < history.length and not history[i] =~ /^__END_GIT_COMMIT_LOG_MSG__/
-		while i < history_length and not history[i] =~ end_re
+		while i < history.length and not history[i] =~ /^__END_GIT_COMMIT_LOG_MSG__/
 			log << history[i] + "\\n"
 			i += 1
 		end
-		# tree is s+1, author name/email is s+2 author datetime is s+3
-		# committer name/email is s+4, committer datetime is s+5
-		db[:git_commit].insert(:commit => commit_id, :tree => history[s+1], 
-			:author => history[s+2], :author_dt => history[s+3],
-			:committer => history[s+4], :committer_dt => history[s+5],
-			:log => log)
+		tree = history[s+1]
+		author = history[s+2]
+		author_dt = history[s+3]
+		committer = history[s+4]
+		committer_dt = history[s+5]
+		commit_data << [commit_id, tree, author, author_dt, committer, 
+			committer_dt, log]
 		# line 6 contains the parents, add those
 		history[s+6].split(/\s+/).each do |parent| 
-		   db[:git_dag].insert(:child => commit_id, :parent => parent)
+			dag_data << [commit_id, parent]
 		end
 
 		#move past the __END_GIT_COMMIT_LOG_MSG__
 		i += 1
 		# lines after this are the files that were changed and counts of lines changed
 		while i < history_length and not history[i] =~ /__START_GIT_COMMIT_LOG_MSG__/
-			if history[i] =~ file_stat_re1
+			if history[i] =~ /^(\d+)\s+(\d+)\s+(.*)/
 				# (lines added)\s+(lines removed)\s+(path)
-				db[:git_revision].insert(:commit => commit_id, :add => $1.to_i,
-					:remove => $2.to_i, :path => $3)
-			elsif history[i] =~ file_stat_re2
-				db[:git_revision].insert(:commit => commit_id, :path => $1)
+				revision_data << [commit_id, $1.to_i, $2.to_i, $3]
+			elsif history[i] =~ /^\-\s+\-\s+(.*)/
+				revision_data << [commit_id, nil, nil, $1]
 			end
 			i += 1
 		end
 	end
 	end
+	history.clear
+	$timer.log
+	puts "inserting #{revision_data.length} revision records"
+	db[:git_revision].multi_insert([:commit, :add, :remove, :path], revision_data)
+	$timer.log
+	puts "inserting #{dag_data.length} dag records"
+	db[:git_dag].multi_insert([:child, :parent], dag_data)
+	$timer.log
+	puts "inserting #{commit_data.length} commit records"
+	db[:git_commit].multi_insert( [:commit, :tree, :author, :author_id,
+		:committer, :committer_dt, :log], commit_data)
+	$timer.log
+	puts "inserting #{refs_tags_data.length} ref/tag records"
+	db[:git_refs_tags].multi_insert([:commit, :path], refs_tags_data)
+	$timer.log
+	puts "inserting #{repo_data.length} repo records"
+	db[:git_repo].multi_insert([:repo, :commit], repo_data)
+	$timer.log
 end	
 
 #do some post processing and fill in the tables
 def update_relations(db)
-	print "gathering number of parents\n"
+	puts "gathering number of parents"
 	db << "update git_commit set num_parents = r.parents from (select child, count(*) as parents from
-		git_dat group by child) as r where r.child = git_commit.commit"
+		git_dag group by child) as r where r.child = git_commit.commit"
+	$timer.log
+	puts "gathering number of children"
 	db << "update git_commit set num_children = r.children from (select parent, count(*) as children from
-		git_dat group by parent) as r where r.parent = git_commit.commit"
+		git_dag group by parent) as r where r.parent = git_commit.commit"
+	$timer.log
 end
 
+
+
+
 def main
-	repo_name = ARGV[0]
-	repo_path = ARGV[1]
-	db_url = ARGV[2]
-	db = Sequel.connect(db_url)
+	opts = Trollop::options do
+		version "git_extract.rb version 0.1"
+		banner <<-EOS
+git_extract.rb will mine information from git and put it into
+a database. You must specify ONE of: repo location with -r or
+log file with -l.  The log file must be the result of running
+(all on one line, no line breaks):
+
+#{$git_log_cmd}
+EOS
+		opt :repo, "path to git repository", :short => "r", :type => String 
+		opt :log, "log file for git repository", :short => "l", :type => String
+		conflicts :log, :repo
+		opt :dburl, "url for database example: postgres://cabird:passwd@localhost/git_db", 
+			:short => "d", :required => true, :type => String
+		opt :name, "repo name to be stored in database", :short => "n", :required => true,
+			:type => String
+	end
+	p opts
+	db = Sequel.connect(opts[:dburl])
 	setup_tables(db, true)
-	mine_git_repo(repo_name, db, repo_path)
+	puts "getting log lines"
+	if opts[:log] != nil
+		history = get_file_log_lines(opts[:log])
+	elsif opts[:repo] != nil
+		history = get_git_log_lines(opts[:repo])
+	else
+		puts "error! no way to get log lines, must specify either location of repo or a log file"
+		exit(1)
+	end
+	$timer.log
+	parse_log(opts[:name], history, db)
 	update_relations(db)
 end
 
