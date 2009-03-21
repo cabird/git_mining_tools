@@ -2,4 +2,13 @@ need to have the following rubygems installed
 	sequel
 	open4
 	some gem that sequel uses for your database
-		postgres-rb, ruby-pg, etc.
+		postgres-rb, ruby-pg, mysql, etc.
+
+invoke as:
+
+ruby git_extract.rb -n haskell_compiler -r ~/ghc -d postgres://cabird:passwd@localhost/git_database
+
+This is an initial release and has only been tested on postgres and mysql.  Email
+me with problems.  cabird@ucdavis.edu
+
+-- Chris
