@@ -11,4 +11,4 @@ ruby git_extract.rb -n haskell_compiler -r ~/ghc -d postgres://cabird:passwd@loc
 This is an initial release and has only been tested on postgres and mysql.  Email
 me with problems.  cabird@ucdavis.edu
 
--- Chris
+-- Christian
