@@ -157,7 +157,18 @@ class Sequel::Dataset
 				multi_insert(schema, data[i*50...(i+1)*50])
 			end
 		else
-			multi_insert(schema, data)
+			row_hashes = []
+			data.each do |row|
+				row_hash = {}
+				col_index = 0
+				schema.each do |col|
+					row_hash[col] = row[col_index]
+					col_index += 1
+				end
+				row_hashes << row_hash
+			end
+
+			multi_insert(row_hashes)
 		end
 	end
 	public_class_method :sliced_multi_insert
